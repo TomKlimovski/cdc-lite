@@ -1,0 +1,2 @@
+# cdc-lite
+lightweight cdc
