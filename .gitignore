@@ -23,5 +23,5 @@ go.work.sum
 
 # env file
 .env
-source.duckdb
+*.duckdb
 cdc_output/
