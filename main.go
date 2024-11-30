@@ -36,7 +36,7 @@ func main() {
 	}()
 
 	// Start monitoring tables
-	tables := []string{"your_table_name"} // Replace with actual table names
+	tables := []string{"users"} // Monitor the users table
 	if err := reader.StartMonitoring(ctx, tables); err != nil {
 		log.Fatalf("Failed to start monitoring: %v", err)
 	}

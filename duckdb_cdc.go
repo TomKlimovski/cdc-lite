@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +26,7 @@ type DuckDBChange struct {
 
 // DuckDBReader handles CDC operations for DuckDB
 type DuckDBReader struct {
-	sourceDB     *sql.DB
+	sourcePath   string
 	metadataDB   *sql.DB
 	outputDir    string
 	buffer       []*DuckDBChange
@@ -35,11 +37,6 @@ type DuckDBReader struct {
 
 // NewDuckDBReader creates a new DuckDB CDC reader
 func NewDuckDBReader(sourcePath, metadataPath, outputDir string) (*DuckDBReader, error) {
-	sourceDB, err := sql.Open("duckdb", sourcePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open source DuckDB: %v", err)
-	}
-
 	metadataDB, err := sql.Open("duckdb", metadataPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open metadata DuckDB: %v", err)
@@ -50,7 +47,7 @@ func NewDuckDBReader(sourcePath, metadataPath, outputDir string) (*DuckDBReader,
 	}
 
 	return &DuckDBReader{
-		sourceDB:     sourceDB,
+		sourcePath:   sourcePath,
 		metadataDB:   metadataDB,
 		outputDir:    outputDir,
 		buffer:       make([]*DuckDBChange, 0),
@@ -84,6 +81,7 @@ func (d *DuckDBReader) StartMonitoring(ctx context.Context, tables []string) err
 		return fmt.Errorf("failed to initialize metadata tables: %v", err)
 	}
 
+	log.Printf("Started monitoring tables: %v", tables)
 	// Start monitoring goroutine
 	go d.monitorTables(ctx)
 
@@ -99,20 +97,90 @@ func (d *DuckDBReader) monitorTables(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Create a temporary copy of the database for reading
+			tmpDB := fmt.Sprintf("%s.tmp.%d", d.sourcePath, time.Now().UnixNano())
+			if err := d.copyFile(d.sourcePath, tmpDB); err != nil {
+				log.Printf("Error copying database: %v", err)
+				continue
+			}
+
+			// Open the temporary database
+			sourceDB, err := sql.Open("duckdb", tmpDB)
+			if err != nil {
+				log.Printf("Error opening temporary database: %v", err)
+				os.Remove(tmpDB)
+				continue
+			}
+
+			// Check each table for changes
 			for _, table := range d.tables {
-				if err := d.checkTableChanges(table); err != nil {
+				if err := d.checkTableChanges(sourceDB, table); err != nil {
 					log.Printf("Error checking changes for table %s: %v\n", table, err)
 				}
 			}
+
+			// Clean up
+			sourceDB.Close()
+			os.Remove(tmpDB)
 		}
 	}
 }
 
-func (d *DuckDBReader) checkTableChanges(table string) error {
+func (d *DuckDBReader) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+func (d *DuckDBReader) getTableColumns(db *sql.DB, table string) ([]string, error) {
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM %s LIMIT 0", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	return columns, nil
+}
+
+func (d *DuckDBReader) checkTableChanges(db *sql.DB, table string) error {
+	// Get table columns
+	columns, err := d.getTableColumns(db, table)
+	if err != nil {
+		return fmt.Errorf("failed to get table columns: %v", err)
+	}
+
+	// Build checksum query using all columns
+	hashParts := make([]string, len(columns))
+	for i, col := range columns {
+		hashParts[i] = fmt.Sprintf("COALESCE(CAST(%s AS VARCHAR), '')", col)
+	}
+	hashExpr := strings.Join(hashParts, " || ',' || ")
+	
+	query := fmt.Sprintf(`
+		SELECT md5(
+			CAST(COUNT(*) AS VARCHAR) || ',' ||
+			CAST(SUM(hash(%s)) AS VARCHAR)
+		) FROM %s`, hashExpr, table)
+
 	// Calculate current table checksum
 	var currentChecksum string
-	query := fmt.Sprintf("SELECT md5(CAST(COUNT(*) AS VARCHAR) || CAST(SUM(hash(*)) AS VARCHAR)) FROM %s", table)
-	err := d.sourceDB.QueryRow(query).Scan(&currentChecksum)
+	err = db.QueryRow(query).Scan(&currentChecksum)
 	if err != nil {
 		return fmt.Errorf("failed to calculate table checksum: %v", err)
 	}
@@ -127,8 +195,9 @@ func (d *DuckDBReader) checkTableChanges(table string) error {
 		LIMIT 1`, table).Scan(&lastChecksum)
 
 	if err == sql.ErrNoRows || lastChecksum != currentChecksum {
+		log.Printf("Changes detected in table %s", table)
 		// Changes detected, capture current state
-		if err := d.captureTableState(table); err != nil {
+		if err := d.captureTableState(db, table); err != nil {
 			return fmt.Errorf("failed to capture table state: %v", err)
 		}
 
@@ -145,8 +214,8 @@ func (d *DuckDBReader) checkTableChanges(table string) error {
 	return nil
 }
 
-func (d *DuckDBReader) captureTableState(table string) error {
-	rows, err := d.sourceDB.Query(fmt.Sprintf("SELECT * FROM %s", table))
+func (d *DuckDBReader) captureTableState(db *sql.DB, table string) error {
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM %s", table))
 	if err != nil {
 		return fmt.Errorf("failed to query table: %v", err)
 	}
@@ -217,6 +286,7 @@ func (d *DuckDBReader) writeBufferToFile() error {
 		}
 	}
 
+	log.Printf("Written changes to file: %s", filePath)
 	// Clear buffer after successful write
 	d.buffer = make([]*DuckDBChange, 0)
 
@@ -224,9 +294,6 @@ func (d *DuckDBReader) writeBufferToFile() error {
 }
 
 func (d *DuckDBReader) Close() error {
-	if err := d.sourceDB.Close(); err != nil {
-		return fmt.Errorf("failed to close source DB: %v", err)
-	}
 	if err := d.metadataDB.Close(); err != nil {
 		return fmt.Errorf("failed to close metadata DB: %v", err)
 	}
