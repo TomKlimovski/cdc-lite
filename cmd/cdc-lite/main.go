@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/tomklimovski/cdc-lite/pkg/duckdb"
 )
 
 func main() {
@@ -19,7 +21,7 @@ func main() {
 	defer cancel()
 
 	// Initialize DuckDB reader
-	reader, err := NewDuckDBReader(sourcePath, metadataPath, outputDir)
+	reader, err := duckdb.NewDuckDBReader(sourcePath, metadataPath, outputDir)
 	if err != nil {
 		log.Fatalf("Failed to create DuckDB reader: %v", err)
 	}
