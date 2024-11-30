@@ -1,5 +1,7 @@
 # cdc-lite
 
+A lightweight Change Data Capture (CDC) solution for DuckDB, designed for simplicity and ease of use.
+
 ## Problem:
 
 - Debezium requires significant infrastructure (Kafka, Connect workers, Zookeeper)
@@ -15,20 +17,63 @@
 - No message queue infrastructure needed
 - Lower operational costs and complexity
 
+## Project Structure
 
-## Simple Deployment
+```
+cdc-lite/
+├── cmd/
+│   └── cdc-lite/        # Main application
+│       └── main.go
+├── pkg/
+│   └── duckdb/          # DuckDB CDC implementation
+│       ├── duckdb_cdc.go
+│       └── duckdb_cdc_test.go
+├── scripts/             # Database setup scripts
+│   └── setup.sql
+└── cdc_output/          # CDC output directory
+```
 
+## Quick Setup
 
-- Single binary deployment
-- Configuration via YAML/JSON
-- Quick setup (minutes vs hours/days)
-- Ideal for dev/test environments
+1. Build the project:
+```bash
+go build -o cdc-lite ./cmd/cdc-lite
+```
 
-## Resource Efficient
+2. Create and populate the source database:
+```bash
+# Create the source database and run setup script
+duckdb source.duckdb < scripts/setup.sql
 
-- Minimal memory footprint
-- Reduced cloud infrastructure costs
-- Suitable for edge computing/IoT scenarios
+# Verify the data
+duckdb source.duckdb "SELECT * FROM users;"
+```
+
+3. Run the CDC monitor:
+```bash
+./cdc-lite
+```
+
+4. In another terminal window, make some changes to demonstrate CDC capturing:
+```bash
+# Insert a new user
+duckdb source.duckdb "INSERT INTO users (id, name, email) VALUES (3, 'Bob Wilson', 'bob@example.com');"
+
+# Wait a few seconds, then update an existing user
+duckdb source.duckdb "UPDATE users SET email = 'john.doe@example.com' WHERE id = 1;"
+
+# Wait a few seconds, then delete a user
+duckdb source.duckdb "DELETE FROM users WHERE id = 2;"
+```
+
+5. View the captured changes:
+```bash
+# List the CDC output files
+ls -l cdc_output/
+
+# View the contents of the change files
+cat cdc_output/changes_*.jsonl
+```
 
 ## Target Users:
 
@@ -40,27 +85,13 @@
 
 Think of it as "SQLite vs PostgreSQL" - while Debezium is enterprise-grade and feature-rich, there's a clear need for a lightweight alternative that prioritizes simplicity and ease of use over advanced features.
 
-# Quick setup
+## Development
 
-First, create and populate the source database:
-### Create the source database and run setup script
-duckdb source.duckdb < setup.sql
+To run tests:
+```bash
+go test ./pkg/duckdb/...
+```
 
-### Verify the data
-duckdb source.duckdb "SELECT * FROM users;"
+## License
 
-In another terminal window, make some changes to demonstrate CDC capturing:
-### Insert a new user
-duckdb source.duckdb "INSERT INTO users (id, name, email) VALUES (3, 'Bob Wilson', 'bob@example.com');"
-
-### Wait a few seconds, then update an existing user
-duckdb source.duckdb "UPDATE users SET email = 'john.doe@example.com' WHERE id = 1;"
-
-### Wait a few seconds, then delete a user
-duckdb source.duckdb "DELETE FROM users WHERE id = 2;"
-
-### List the CDC output files
-ls -l cdc_output/
-
-### View the contents of the change files
-cat cdc_output/changes_*.jsonl
+This project is licensed under the terms of the LICENSE file included in the repository.
